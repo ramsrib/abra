@@ -45,15 +45,36 @@ func playTone(_ name: String) {
 
 // MARK: - engine client (stdio JSON protocol)
 
+/// Append-only shell log — Finder-launched apps have no visible stderr, so
+/// anything worth debugging later must land here.
+let shellLog: FileHandle = {
+    let url = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/abra-shell.log")
+    if !FileManager.default.fileExists(atPath: url.path) {
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+    }
+    guard let h = try? FileHandle(forWritingTo: url) else { return .standardError }
+    try? h.seekToEnd()
+    return h
+}()
+
+func slog(_ msg: String) {
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    shellLog.write(Data("\(stamp) \(msg)\n".utf8))
+    FileHandle.standardError.write(Data("\(msg)\n".utf8))  // visible in dev runs
+}
+
 final class EngineClient {
-    private let process = Process()
-    private let toEngine = Pipe()
-    private let fromEngine = Pipe()
+    private var process: Process?
+    private var toEngine = Pipe()
+    private var fromEngine = Pipe()
     private var buffer = Data()
     private var nextId = 0
     private let queue = DispatchQueue(label: "abra.engine.io")
+    private var intentionalStop = false
 
     var onReady: ((String) -> Void)?
+    var onRestarting: (() -> Void)?
 
     /// Finder-launched apps don't inherit a shell PATH — locate uv directly.
     private func findUv() -> (String, [String]) {
@@ -66,18 +87,31 @@ final class EngineClient {
     }
 
     func start() {
+        intentionalStop = false
+        buffer = Data()
+        toEngine = Pipe()
+        fromEngine = Pipe()
+        let p = Process()
         let (uv, prefix) = findUv()
-        process.currentDirectoryURL = repoRoot
-        process.executableURL = URL(fileURLWithPath: uv)
-        process.arguments = prefix + ["run", "abra-engine"]
-        process.standardInput = toEngine
-        process.standardOutput = fromEngine
-        process.standardError = FileHandle.standardError
-        process.terminationHandler = { _ in
-            FileHandle.standardError.write(Data("engine exited — quitting shell\n".utf8))
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+        p.currentDirectoryURL = repoRoot
+        p.executableURL = URL(fileURLWithPath: uv)
+        p.arguments = prefix + ["run", "abra-engine"]
+        p.standardInput = toEngine
+        p.standardOutput = fromEngine
+        p.standardError = shellLog  // engine diagnostics land in the log too
+        p.terminationHandler = { [weak self] proc in
+            guard let self, !self.intentionalStop else { return }
+            slog("engine exited (status \(proc.terminationStatus)) — restarting in 1s")
+            DispatchQueue.main.async { self.onRestarting?() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
         }
-        try! process.run()
+        process = p
+        do { try p.run() } catch {
+            slog("engine failed to launch: \(error.localizedDescription)")
+            DispatchQueue.main.async { self.onRestarting?() }
+            return
+        }
+        slog("engine started (pid \(p.processIdentifier))")
         queue.async { [self] in
             if let line = readLine() { // {"event":"ready",...}
                 let model = (try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
@@ -90,13 +124,25 @@ final class EngineClient {
     /// Blocking request/response; call from a background queue.
     func transcribe(wav: URL, started: Double, ended: Double) -> [String: Any]? {
         queue.sync { [self] in
+            guard let p = process, p.isRunning else {
+                slog("transcribe skipped: engine not running")
+                return nil
+            }
             nextId += 1
             let req: [String: Any] = ["id": nextId, "cmd": "transcribe",
                                       "wav": wav.path, "started": started, "ended": ended]
             let data = try! JSONSerialization.data(withJSONObject: req)
             toEngine.fileHandleForWriting.write(data + Data("\n".utf8))
-            guard let line = readLine() else { return nil }
-            return try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            guard let line = readLine() else {
+                slog("transcribe: EOF from engine stdout")
+                return nil
+            }
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            else {
+                slog("transcribe: unparseable engine line: \(line.prefix(300))")
+                return nil
+            }
+            return obj
         }
     }
 
@@ -113,7 +159,10 @@ final class EngineClient {
         }
     }
 
-    func stop() { process.terminate() }
+    func stop() {
+        intentionalStop = true
+        process?.terminate()
+    }
 }
 
 // MARK: - mic capture (one engine, session-long; armed flag gates it)
@@ -383,6 +432,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             engineReady = true
             statusLine.isHidden = true
             setIcon("mic", help: "abra: ready")
+        }
+        engineClient.onRestarting = { [self] in
+            engineReady = false
+            statusLine.title = "engine restarting…"
+            statusLine.isHidden = false
+            setIcon("hourglass", help: "abra: engine restarting…")
         }
         engineClient.start()
 
