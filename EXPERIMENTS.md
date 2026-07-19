@@ -8,14 +8,19 @@ below is a suggestion, not a commitment.
 
 ## Phase 1 — prove the loop
 
-### 01 · Python end-to-end prototype ✅ (scaffolded)
+### 01 · Python end-to-end prototype ✅ graduated
 **Question:** does hotkey → record → parakeet-mlx → paste feel instant enough to use daily?
 
-- pynput global listener (right Option), sounddevice capture at 16 kHz mono,
-  batch transcribe on key-release, pasteboard + synthetic ⌘V.
-- **Measure:** key-release → text-visible latency per clip length. Target: under ~400 ms
-  for a 5–10 s clip. Log observations in the experiment README's table.
-- **Kill criteria:** none — this is the baseline everything else beats.
+**Answer: yes.** Proven in three days of daily-driving, then promoted into the
+real package (`abra/engine` + `abra/shell`). What it established:
+
+| date | finding |
+|---|---|
+| 2026-07-16 | Full loop feels instant: parakeet on M-series transcribes 2–6s clips in ~250ms warm. |
+| 2026-07-16 | v2 emitted all-`<unk>` for a 6.9s English clip (2046ms). Re-run later on the same wav: perfect transcript from the same model. Transient runtime corruption, plausibly Metal under memory pressure — watch for recurrence. |
+| 2026-07-17 | Latency spikes (800–1400ms vs ~250ms baseline) cluster after idle gaps — model paged out. Confirmed from clips.db: 859ms avg <30s idle → 1650ms avg >5m idle, max 8.8s. Led to the engine keep-warm heartbeat. |
+| 2026-07-18 | Hard hang, Ctrl+C-immune. `sample` showed a CoreAudio lock-order deadlock between PortAudio's stream stop and the HAL IO thread — triggered by per-clip stream start/stop churn. Fix: one persistent mic stream, tones via afplay, transcription on a worker thread, exit via os._exit. Also: process footprint grew to 5.9GB after ~a day — watch memory over long sessions. |
+| 2026-07-16→18 | Mishear collection became the personal-dictionary seed rules (vocab.toml) and its test set. |
 
 ### STT engine bench
 **Question:** which local STT engine wins on latency × accuracy for *my* voice and vocabulary?
