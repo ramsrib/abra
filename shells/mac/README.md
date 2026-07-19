@@ -32,8 +32,10 @@ If quick Fn taps open the emoji picker, set System Settings → Keyboard →
    installed to /Applications — own permission identity, no terminal
 7. ✅ Launch at Login toggle in the menu (SMAppService; needs the .app install)
 
-Next: own the corpus/engine location properly (currently the app finds the
-repo via a compile-time path — fine for a dev machine, not for distribution).
+Engine resolution is runtime now: `$ABRA_ENGINE_DIR` → `~/.abra/engine`
+(the brew-install location, pinned to the release tag) → the dev checkout.
+Next milestone (0.3): bundle the engine inside the .app so installs need
+neither git nor uv.
 
 ## Build & run
 

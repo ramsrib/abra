@@ -22,29 +22,32 @@ say ever leaves your Mac.
   with timing metadata, which doubles as a benchmark suite for comparing
   STT models on your own voice
 
-## Requirements
-
-- Apple Silicon Mac, macOS 13+
-- [uv](https://docs.astral.sh/uv/) and [ffmpeg](https://ffmpeg.org)
-  (`brew install uv ffmpeg`)
-- ~700MB disk for the model (downloaded on first run)
-
 ## Install
 
 ```bash
-git clone https://github.com/ramsrib/abra ~/.abra/engine
-cd ~/.abra/engine
-uv sync
-make app          # builds, signs, installs /Applications/Abra.app
+brew install ramsrib/tap/abra
 open /Applications/Abra.app
 ```
 
-Grant the permission prompts (Microphone, Accessibility, Input Monitoring —
-all attributed to "abra"), then hold **Fn** and talk. Enable *Launch at
-Login* from the menu bar icon.
+That's it — the cask installs the app (signed & notarized), its dependencies,
+and the transcription engine. Grant the permission prompts (Microphone, then
+Accessibility and Input Monitoring — all attributed to "abra"), wait out the
+one-time model download (~700MB, menu bar icon shows an hourglass), then hold
+**Fn** and talk. Enable *Launch at Login* from the menu bar icon.
 
-Terminal-only use works too — `make run` starts the Python shell (hold right
-Option), attributed to your terminal's permissions instead.
+Updates: `brew upgrade abra` — the app and engine move together, pinned to
+each release.
+
+Requires an Apple Silicon Mac on macOS 13+.
+
+### From source (development)
+
+```bash
+git clone https://github.com/ramsrib/abra && cd abra
+uv sync           # engine deps (needs uv + ffmpeg: brew install uv ffmpeg)
+make app          # build, sign, install /Applications/Abra.app
+make run          # or: terminal-only Python shell (hold right Option)
+```
 
 ## How it works
 
