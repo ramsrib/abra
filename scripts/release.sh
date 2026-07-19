@@ -25,7 +25,7 @@ grep -q "status: Accepted" /tmp/abra-notary.log || { echo "!! notarization rejec
 xcrun stapler staple /Applications/Abra.app
 rm dist/Abra-notarize.zip
 
-ZIP="dist/Abra-$VERSION-arm64.zip"  # MLX engine is Apple Silicon-only
+ZIP="dist/Abra-$VERSION-darwin-arm64.zip"  # MLX engine is Apple Silicon-only
 ditto -c -k --keepParent /Applications/Abra.app "$ZIP"
 SHA=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)
 
@@ -48,5 +48,5 @@ sed -i '' \
     && git add Casks/abra.rb && git commit -m "abra $VERSION" && git push)
 
 echo "== released v$VERSION"
-echo "   asset: Abra-$VERSION-arm64.zip  sha256: $SHA"
+echo "   asset: Abra-$VERSION-darwin-arm64.zip  sha256: $SHA"
 echo "   cask bumped and pushed — brew users get it on next brew update"
