@@ -72,9 +72,12 @@ final class EngineClient {
     private var nextId = 0
     private let queue = DispatchQueue(label: "abra.engine.io")
     private var intentionalStop = false
+    private var restartAttempts = 0
+    private static let maxRestarts = 5
 
     var onReady: ((String) -> Void)?
     var onRestarting: (() -> Void)?
+    var onGaveUp: (() -> Void)?
 
     /// Finder-launched apps don't inherit a shell PATH — locate uv directly.
     private func findUv() -> (String, [String]) {
@@ -101,9 +104,20 @@ final class EngineClient {
         p.standardError = shellLog  // engine diagnostics land in the log too
         p.terminationHandler = { [weak self] proc in
             guard let self, !self.intentionalStop else { return }
-            slog("engine exited (status \(proc.terminationStatus)) — restarting in 1s")
+            self.restartAttempts += 1
+            guard self.restartAttempts <= Self.maxRestarts else {
+                slog("engine exited (status \(proc.terminationStatus)) — "
+                     + "giving up after \(Self.maxRestarts) consecutive failures")
+                DispatchQueue.main.async { self.onGaveUp?() }
+                return
+            }
+            // Exponential backoff so a persistently-broken engine doesn't
+            // become a fork bomb: 1s, 2s, 4s, 8s, 16s, then give up.
+            let delay = min(pow(2.0, Double(self.restartAttempts - 1)), 30)
+            slog("engine exited (status \(proc.terminationStatus)) — "
+                 + "restart \(self.restartAttempts)/\(Self.maxRestarts) in \(Int(delay))s")
             DispatchQueue.main.async { self.onRestarting?() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.start() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.start() }
         }
         process = p
         do { try p.run() } catch {
@@ -116,6 +130,7 @@ final class EngineClient {
             if let line = readLine() { // {"event":"ready",...}
                 let model = (try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
                     .flatMap { $0?["model"] as? String } ?? "?"
+                restartAttempts = 0  // reached ready: healthy again
                 DispatchQueue.main.async { self.onReady?(model) }
             }
         }
@@ -438,6 +453,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusLine.title = "engine restarting…"
             statusLine.isHidden = false
             setIcon("hourglass", help: "abra: engine restarting…")
+        }
+        engineClient.onGaveUp = { [self] in
+            engineReady = false
+            fail("engine keeps crashing — see ~/Library/Logs/abra-shell.log")
         }
         engineClient.start()
 
