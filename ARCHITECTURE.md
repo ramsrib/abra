@@ -65,3 +65,9 @@ protocol-only; diagnostics go to stderr. Defined and versioned in
 5. The model gets paged out during idle and costs seconds on wake — the
    engine keep-warm heartbeat exists because clip data proved it
    (859ms avg <30s idle vs 1650ms avg >5m, max 8.8s).
+6. The shell supervises the engine: auto-restart with exponential backoff,
+   bounded at 5 consecutive failures, then a visible give-up with a pointer
+   to `~/Library/Logs/abra-shell.log` (where engine stderr and protocol
+   failures are recorded — Finder-launched apps have no stderr otherwise).
+7. A running instance survives bundle replacement (`brew upgrade`,
+   `make release`) executing old code — quit and relaunch after upgrades.

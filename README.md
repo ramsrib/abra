@@ -69,6 +69,7 @@ shell today. Features live in the engine and survive shell rewrites.
 - `shells/mac/` — Swift menu bar shell (hold-Fn, the daily driver)
 - `vocab.toml` / `vocab.local.toml` — dictionary rules (shared / yours)
 - `EXPERIMENTS.md` — the experiment backlog this project runs on
+- `NOTES.md` — engineering chores and operational knowledge
 
 ## Your data
 
