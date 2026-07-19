@@ -50,15 +50,5 @@ stats: # corpus numbers: per-model latency and the idle→latency curve
 kill: # stop a running abra instance
 	@pkill -f '\.venv/bin/abra' && echo "killed" || echo "no abra running"
 
-release: app # notarize, staple, zip to dist/ (needs NOTARY_* in .env — see .env.example)
-	@set -a; . ./.env; set +a; \
-	KEY=$$(eval echo $$NOTARY_KEY_PATH); \
-	mkdir -p dist; \
-	ditto -c -k --keepParent /Applications/Abra.app dist/Abra-notarize.zip; \
-	xcrun notarytool submit dist/Abra-notarize.zip --key "$$KEY" \
-		--key-id "$$NOTARY_KEY_ID" --issuer "$$NOTARY_ISSUER" --wait; \
-	xcrun stapler staple /Applications/Abra.app; \
-	VERSION=$$(plutil -extract CFBundleShortVersionString raw shells/mac/Sources/AbraShell/Info.plist); \
-	ditto -c -k --keepParent /Applications/Abra.app dist/Abra-$$VERSION.zip; \
-	rm dist/Abra-notarize.zip; \
-	shasum -a 256 dist/Abra-$$VERSION.zip
+release: # full release: build, sign, notarize, staple, zip, gh release, tap bump
+	./scripts/release.sh

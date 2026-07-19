@@ -298,6 +298,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = menu
         setIcon("hourglass", help: "abra: starting…")
 
+        // Direct-download users may not have the engine yet — explain instead
+        // of dying when its process exits.
+        if !FileManager.default.fileExists(
+            atPath: repoRoot.appendingPathComponent("pyproject.toml").path) {
+            let alert = NSAlert()
+            alert.messageText = "abra needs its engine"
+            alert.informativeText = """
+            The transcription engine wasn't found on this Mac.
+
+            Easiest fix — install via Homebrew (sets up everything):
+                brew install ramsrib/tap/abra
+
+            Or set it up manually:
+                git clone https://github.com/ramsrib/abra ~/.abra/engine
+                cd ~/.abra/engine && uv sync
+            """
+            alert.addButton(withTitle: "Open Setup Guide")
+            alert.addButton(withTitle: "Quit")
+            NSApp.activate(ignoringOtherApps: true)
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.open(
+                    URL(string: "https://github.com/ramsrib/abra#install")!)
+            }
+            exit(1)
+        }
+
         // Prompt for accessibility if missing (needed for paste injection).
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
