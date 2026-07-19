@@ -296,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Quit abra", action: #selector(quit),
                                 keyEquivalent: "q"))
         statusItem.menu = menu
-        setIcon("hourglass", help: "abra: starting…")
+        setIcon("hourglass", help: "abra: setting up…")
 
         // Direct-download users may not have the engine yet — explain instead
         // of dying when its process exits.
@@ -324,7 +324,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             exit(1)
         }
 
-        // Prompt for accessibility if missing (needed for paste injection).
+        // Engine needs no permissions — start it now so the model loads (or
+        // downloads, on first run) while the permission prompts play out.
+        statusLine.title = "setting up…"
+        engineClient.onReady = { [self] _ in
+            engineReady = true
+            statusLine.isHidden = true
+            setIcon("mic", help: "abra: ready")
+        }
+        engineClient.start()
+
+        // One permission prompt at a time: simultaneous mic + accessibility
+        // dialogs clobber each other (answering one dismisses the other,
+        // forcing a quit-and-reopen). Mic first; the rest after it resolves.
+        AVCaptureDevice.requestAccess(for: .audio) { _ in
+            DispatchQueue.main.async { self.finishSetup() }
+        }
+    }
+
+
+    private func finishSetup() {
+        // Accessibility prompt (needed for paste injection), after mic settled.
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
 
@@ -368,13 +388,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
-
-        engineClient.onReady = { [self] _ in
-            engineReady = true
-            statusLine.isHidden = true
-            setIcon("mic", help: "abra: ready")
-        }
-        engineClient.start()
     }
 
     private func setIcon(_ symbol: String, help: String) {
