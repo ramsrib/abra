@@ -167,6 +167,12 @@ final class AudioCapture {
         try? engine.start()  // resumes IO; lights the mic indicator
     }
 
+    /// Abort a capture without producing audio (hotkey used in a combo).
+    func cancelCapture() {
+        engine.pause()
+        lock.lock(); armed = false; samples = []; lock.unlock()
+    }
+
     /// Disarm and write captured audio to a temp wav. Returns nil if too short.
     func disarmToWav(minSeconds: Double) -> URL? {
         engine.pause()  // releases the mic; indicator goes dark
@@ -222,31 +228,63 @@ func pasteAtCursor(_ text: String) {
     }
 }
 
-// MARK: - global hotkey via CGEventTap (THE Fn experiment)
+// MARK: - global hotkey via CGEventTap
+
+enum Hotkey: String, CaseIterable {
+    case fn = "Fn"
+    case rightOption = "Right Option (⌥)"
+    case rightCommand = "Right Command (⌘)"
+
+    var keyCode: Int64 {
+        switch self {
+        case .fn: return 63
+        case .rightOption: return 61
+        case .rightCommand: return 54
+        }
+    }
+
+    var flag: CGEventFlags {
+        switch self {
+        case .fn: return .maskSecondaryFn
+        case .rightOption: return .maskAlternate
+        case .rightCommand: return .maskCommand
+        }
+    }
+
+    static var saved: Hotkey {
+        Hotkey(rawValue: UserDefaults.standard.string(forKey: "hotkey") ?? "") ?? .fn
+    }
+}
 
 final class HotkeyTap {
-    // keycodes seen in flagsChanged events
-    static let kFn: Int64 = 63
-    static let kRightOption: Int64 = 61
-
+    var hotkey: Hotkey = .saved
     var onPress: (() -> Void)?
     var onRelease: (() -> Void)?
+    /// Another key was pressed while the hotkey was held — the user is doing a
+    /// combo (Fn+arrow, ⌘+c, …), not dictating. Cancel without transcribing.
+    var onCombo: (() -> Void)?
     private var tap: CFMachPort?
     private var holding = false
 
     func start() -> Bool {
-        let mask: CGEventMask = 1 << CGEventType.flagsChanged.rawValue
+        let mask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             let me = Unmanaged<HotkeyTap>.fromOpaque(refcon!).takeUnretainedValue()
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 if let tap = me.tap { CGEvent.tapEnable(tap: tap, enable: true) }
                 return Unmanaged.passUnretained(event)
             }
+            if type == .keyDown {
+                if me.holding {
+                    me.holding = false
+                    DispatchQueue.main.async { me.onCombo?() }
+                }
+                return Unmanaged.passUnretained(event)
+            }
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            if keyCode == HotkeyTap.kFn || keyCode == HotkeyTap.kRightOption {
-                let pressed = keyCode == HotkeyTap.kFn
-                    ? event.flags.contains(.maskSecondaryFn)
-                    : event.flags.contains(.maskAlternate)
+            if keyCode == me.hotkey.keyCode {
+                let pressed = event.flags.contains(me.hotkey.flag)
                 if pressed && !me.holding {
                     me.holding = true
                     DispatchQueue.main.async { me.onPress?() }
@@ -281,6 +319,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkey = HotkeyTap()
     private let work = DispatchQueue(label: "abra.transcribe")
     private var engineReady = false
+    private var pendingStartTone: DispatchWorkItem?
+    private var startTonePlayed = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -288,6 +328,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLine = NSMenuItem(title: "starting…", action: nil, keyEquivalent: "")
         menu.addItem(statusLine)
         menu.addItem(.separator())
+        let hotkeyMenu = NSMenu()
+        for choice in Hotkey.allCases {
+            let item = NSMenuItem(title: choice.rawValue,
+                                  action: #selector(selectHotkey(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice.rawValue
+            item.state = choice == Hotkey.saved ? .on : .off
+            hotkeyMenu.addItem(item)
+        }
+        let hotkeyItem = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
+        menu.addItem(hotkeyItem)
+        menu.setSubmenu(hotkeyMenu, for: hotkeyItem)
         let login = NSMenuItem(title: "Launch at Login",
                                action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
         login.target = self
@@ -360,12 +412,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkey.onPress = { [self] in
             guard engineReady else { return }
             audio.arm()
-            playTone("record-start.wav")
             setIcon("mic.fill", help: "abra: recording")
+            // Delay the start tone slightly: if the hotkey turns out to be
+            // part of a combo (Fn+arrow etc.), the cancel arrives first and
+            // combos stay completely silent. Capture is armed from t=0, so
+            // no speech is lost.
+            startTonePlayed = false
+            let tone = DispatchWorkItem { [self] in
+                startTonePlayed = true
+                playTone("record-start.wav")
+            }
+            pendingStartTone = tone
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: tone)
+        }
+        hotkey.onCombo = { [self] in
+            pendingStartTone?.cancel()
+            pendingStartTone = nil
+            audio.cancelCapture()
+            setIcon("mic", help: "abra: ready")
         }
         hotkey.onRelease = { [self] in
             guard engineReady else { return }
-            playTone("record-stop.wav")
+            pendingStartTone?.cancel()
+            pendingStartTone = nil
+            if startTonePlayed {
+                playTone("record-stop.wav")
+            }
             let ended = Date().timeIntervalSince1970
             guard let wav = audio.disarmToWav(minSeconds: 0.4) else {
                 setIcon("mic", help: "abra: ready (clip too short)")
@@ -401,6 +473,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLine.title = "⚠ \(msg)"
         statusLine.isHidden = false
         setIcon("mic.badge.xmark", help: "abra: \(msg)")
+    }
+
+    @objc private func selectHotkey(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let choice = Hotkey(rawValue: raw) else { return }
+        UserDefaults.standard.set(raw, forKey: "hotkey")
+        hotkey.hotkey = choice
+        sender.menu?.items.forEach { $0.state = $0 == sender ? .on : .off }
     }
 
     @objc private func toggleLoginItem(_ sender: NSMenuItem) {
