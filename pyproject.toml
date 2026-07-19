@@ -1,0 +1,24 @@
+[project]
+name = "abra"
+version = "0.2.0"
+description = "abra — local push-to-talk dictation for macOS (engine + replaceable shells)"
+requires-python = ">=3.11"
+dependencies = [
+    "parakeet-mlx",
+    "sounddevice",
+    "soundfile",
+    "numpy",
+    "numba>=0.60",
+    "pynput",
+]
+
+[project.scripts]
+abra = "abra.shell.main:main"
+abra-engine = "abra.engine.serve:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["abra"]

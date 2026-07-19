@@ -1,0 +1,11 @@
+# abra personal dictionary — phrase replacements applied to raw STT output.
+# Matched case-insensitively on word boundaries, longest phrase first.
+#
+# Put YOUR words in vocab.local.toml (gitignored) — same format, merged on
+# top of this file. These starter rules fix mishears everyone hits with abra.
+
+[replace]
+"come in and push" = "commit and push"
+"come eat and push" = "commit and push"
+"uv run a bra" = "uv run abra"
+"a bra" = "abra"

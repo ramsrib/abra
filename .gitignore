@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+*.wav
+clips/
+.build/
+
+# sound assets are the exception to *.wav (that rule is for voice clips)
+!abra/shell/assets/sounds/*.wav
+vocab.local.toml

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Hardened-runtime apps get silent mic zeros without this entitlement
+         (see ARCHITECTURE.md, hard-won platform rules). -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    <!-- The engine child process (uv/python) is unsigned relative to us. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
