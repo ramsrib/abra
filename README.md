@@ -33,7 +33,10 @@ That's it — the cask installs the app (signed & notarized), its dependencies,
 and the transcription engine. Grant the permission prompts (Microphone, then
 Accessibility and Input Monitoring — all attributed to "abra"), wait out the
 one-time model download (~700MB, menu bar icon shows an hourglass), then hold
-**Fn** and talk. Enable *Launch at Login* from the menu bar icon.
+**Fn** and talk. The menu bar icon has *Launch at Login* and a *Hotkey*
+picker (Fn, right ⌥, or right ⌘). Holding the hotkey while pressing any
+other key — Fn+arrows, ⌘ shortcuts — is left alone: combos pass through,
+no recording, no sound.
 
 Updates: `brew upgrade abra` — the app and engine move together, pinned to
 each release.
