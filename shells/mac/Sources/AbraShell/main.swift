@@ -54,7 +54,7 @@ let shellLog: FileHandle = {
         FileManager.default.createFile(atPath: url.path, contents: nil)
     }
     guard let h = try? FileHandle(forWritingTo: url) else { return .standardError }
-    try? h.seekToEnd()
+    _ = try? h.seekToEnd()
     return h
 }()
 
