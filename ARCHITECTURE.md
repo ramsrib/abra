@@ -34,7 +34,21 @@ wins becomes an engine-internal choice.
   over stdio. See its README for the roadmap.
 - `experiments/` — disposable bench harnesses and A/B tests only.
 - `clips/` — the corpus (wavs + clips.db). Local-only, gitignored.
-- `vocab.toml` — the personal dictionary rules (committed).
+- `vocab.toml` — seed dictionary rules, committed, shipped with the engine.
+
+## User data lives outside the engine copy (2026-07-25)
+
+`~/.abra/vocab.local.toml` is the *only* personal dictionary on a machine.
+Anything a user creates must sit outside whichever engine copy happens to be
+running: a checkout and `~/.abra/engine` are two installs of the same program,
+and rules written next to one are invisible to the other — the app and
+`make run` silently disagreed about the dictionary until this moved out.
+Same reasoning as `clips/` being a fixed path rather than a relative one.
+
+Corollary: the engine owns the file, not the shells. Reading, writing,
+validating and merging happen in `dictionary.py`; a shell only renders what
+the protocol hands it, so every shell shows the same rules and none can
+invent its own file format.
 
 ## Shell ↔ engine protocol
 
@@ -48,6 +62,12 @@ protocol-only; diagnostics go to stderr. Defined and versioned in
   — `text` is post-dictionary (paste this); `raw_text` is the STT output.
   The engine logs the clip to the corpus itself unless started with
   `--no-save`.
+- `dictionary` / `dictionary_add {from, to}` / `dictionary_remove {from}` →
+  `{path, rules: [{from, to, builtin}]}` — all three answer with the full
+  post-change list, so a shell never has to model the merge itself. `builtin`
+  rules come from `vocab.toml` and are read-only; writes only ever touch
+  `~/.abra/vocab.local.toml`. Rejected edits come back as `ok: false` with a
+  human-readable `error` to show verbatim.
 
 ## Hard-won platform rules (do not relearn these)
 

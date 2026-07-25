@@ -16,6 +16,14 @@ The third notebook, complementing the other two:
 - [ ] **Self-relaunch after upgrade** — a running instance survives
   `brew upgrade`/`make release` bundle swaps and keeps executing old code
   ("zombie instance"). Detect the bundle change on disk and prompt to relaunch.
+- [ ] **Dictionary rules that write themselves** — the window is manual
+  today. The corpus already holds `raw_text` and the `corrected` column, so a
+  mishear you fix once is recoverable: diff raw vs corrected, propose the
+  phrase pair, let the user accept. Needs a correction path first — either
+  "Fix Last Dictation…" in the menu (prefilled with what abra just heard) or
+  mining `clips.db` in the background. Rules land in the same
+  `~/.abra/vocab.local.toml`; auto-proposed ones probably want a marker
+  (separate `[auto]` table?) so they're distinguishable from hand-written.
 - [ ] **STT bench (experiment 02)** — blocked on ~30 hand-corrected clips in
   `clips/clips.db` (`corrected` column; workflow in the clips section of the
   old experiment notes / `make stats`).

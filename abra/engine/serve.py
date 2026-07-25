@@ -11,6 +11,14 @@ per line; stdout is protocol-only, diagnostics go to stderr):
   ← {"id": 2, "ok": true, "text": "...", "raw_text": "...",
      "stt_ms": 251.0, "duration_s": 3.3}
 
+  → {"id": 3, "cmd": "dictionary"}                        # list every rule
+  → {"id": 3, "cmd": "dictionary_add", "from": "ctu", "to": "CPU"}
+  → {"id": 3, "cmd": "dictionary_remove", "from": "ctu"}
+  ← {"id": 3, "ok": true, "path": "~/.abra/vocab.local.toml",
+     "rules": [{"from": "ctu", "to": "CPU", "builtin": false}, ...]}
+     # all three answer with the full post-change list; builtin rules ship
+     # with the engine and only the user's own can be added or removed
+
   ← {"event": "ready", "model": "..."}                    # once, at startup
 
 Errors: {"id": N, "ok": false, "error": "..."}.
@@ -45,6 +53,7 @@ def main():
         line = line.strip()
         if not line:
             continue
+        req = None
         try:
             req = json.loads(line)
             rid = req.get("id")
@@ -63,8 +72,23 @@ def main():
                 resp = {"id": rid, "ok": True, "text": result.text,
                         "raw_text": result.raw_text, "stt_ms": result.stt_ms,
                         "duration_s": result.duration_s}
+            elif cmd in ("dictionary", "dictionary_add", "dictionary_remove"):
+                if cmd == "dictionary_add":
+                    engine.dictionary.add(req["from"], req["to"])
+                elif cmd == "dictionary_remove":
+                    engine.dictionary.remove(req["from"])
+                resp = {"id": rid, "ok": True,
+                        "path": str(engine.dictionary.user_path),
+                        "rules": [{"from": r.heard, "to": r.replacement,
+                                   "builtin": r.builtin}
+                                  for r in engine.dictionary.rules()]}
             else:
                 resp = {"id": rid, "ok": False, "error": f"unknown cmd: {cmd}"}
+        except json.JSONDecodeError as e:  # (a ValueError — keep the type here)
+            resp = {"id": None, "ok": False, "error": f"bad request line: {e}"}
+        except ValueError as e:  # rejected input — the message is the whole story
+            resp = {"id": req.get("id") if isinstance(req, dict) else None,
+                    "ok": False, "error": str(e)}
         except Exception as e:  # protocol must never crash the engine
             resp = {"id": req.get("id") if isinstance(req, dict) else None,
                     "ok": False, "error": f"{type(e).__name__}: {e}"}

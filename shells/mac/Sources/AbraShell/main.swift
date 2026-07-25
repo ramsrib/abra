@@ -137,28 +137,33 @@ final class EngineClient {
     }
 
     /// Blocking request/response; call from a background queue.
-    func transcribe(wav: URL, started: Double, ended: Double) -> [String: Any]? {
+    /// nil means the engine never answered — distinct from an `ok: false` reply.
+    func request(_ cmd: String, _ params: [String: Any] = [:]) -> [String: Any]? {
         queue.sync { [self] in
             guard let p = process, p.isRunning else {
-                slog("transcribe skipped: engine not running")
+                slog("\(cmd) skipped: engine not running")
                 return nil
             }
             nextId += 1
-            let req: [String: Any] = ["id": nextId, "cmd": "transcribe",
-                                      "wav": wav.path, "started": started, "ended": ended]
+            var req: [String: Any] = ["id": nextId, "cmd": cmd]
+            req.merge(params) { _, given in given }
             let data = try! JSONSerialization.data(withJSONObject: req)
             toEngine.fileHandleForWriting.write(data + Data("\n".utf8))
             guard let line = readLine() else {
-                slog("transcribe: EOF from engine stdout")
+                slog("\(cmd): EOF from engine stdout")
                 return nil
             }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
             else {
-                slog("transcribe: unparseable engine line: \(line.prefix(300))")
+                slog("\(cmd): unparseable engine line: \(line.prefix(300))")
                 return nil
             }
             return obj
         }
+    }
+
+    func transcribe(wav: URL, started: Double, ended: Double) -> [String: Any]? {
+        request("transcribe", ["wav": wav.path, "started": started, "ended": ended])
     }
 
     private func readLine() -> String? {
@@ -177,6 +182,217 @@ final class EngineClient {
     func stop() {
         intentionalStop = true
         process?.terminate()
+    }
+}
+
+// MARK: - dictionary window
+// Pure UI over the engine's dictionary commands — the rules, the file and the
+// matching all live in abra/engine/dictionary.py. Every mutation answers with
+// the full list, so the table always shows what the engine will actually apply.
+
+struct DictRule {
+    let heard: String
+    let replacement: String
+    let builtin: Bool   // shipped in vocab.toml: shown, not editable
+
+    init?(_ obj: Any) {
+        guard let d = obj as? [String: Any],
+              let heard = d["from"] as? String,
+              let replacement = d["to"] as? String else { return nil }
+        self.heard = heard
+        self.replacement = replacement
+        self.builtin = d["builtin"] as? Bool ?? false
+    }
+}
+
+final class DictionaryWindow: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private let engine: EngineClient
+    private let work = DispatchQueue(label: "abra.dictionary")
+    private var rules: [DictRule] = []
+    private let table = NSTableView()
+    private var removeButton: NSButton!
+    private var window: NSWindow!
+
+    init(engine: EngineClient) {
+        self.engine = engine
+        super.init()
+        build()
+    }
+
+    func show() {
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        send("dictionary")
+    }
+
+    private func build() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+                          styleMask: [.titled, .closable, .resizable],
+                          backing: .buffered, defer: false)
+        window.title = "abra Dictionary"
+        window.isReleasedWhenClosed = false   // reopened from the menu
+        window.center()
+
+        // Widths must total under the 456pt content area or the ⌾ marker
+        // clips off the right edge instead of sitting beside its rule.
+        for (id, title, width) in [("heard", "heard", 188.0),
+                                   ("replacement", "replacement", 188.0),
+                                   ("builtin", "", 24.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            table.addTableColumn(column)
+        }
+        table.dataSource = self
+        table.delegate = self
+        table.usesAlternatingRowBackgroundColors = true
+        table.style = .inset
+        table.allowsMultipleSelection = false
+
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        // Table controls, macOS convention: a joined +/− pair tucked under the
+        // table's left edge, the legend pushed to the opposite corner.
+        let add = NSButton(title: "+", target: self, action: #selector(addRule))
+        removeButton = NSButton(title: "−", target: self, action: #selector(removeRule))
+        removeButton.isEnabled = false
+        for b in [add, removeButton!] {
+            b.bezelStyle = .smallSquare
+            b.setContentHuggingPriority(.required, for: .horizontal)
+            NSLayoutConstraint.activate([
+                b.widthAnchor.constraint(equalToConstant: 26),
+                b.heightAnchor.constraint(equalToConstant: 22),
+            ])
+        }
+        let legend = NSTextField(labelWithString: "⌾ built-in — your own rules override them")
+        legend.textColor = .secondaryLabelColor
+        legend.font = .systemFont(ofSize: 11)
+
+        let controls = NSStackView()
+        controls.orientation = .horizontal
+        controls.addView(add, in: .leading)
+        controls.addView(removeButton, in: .leading)
+        controls.setCustomSpacing(0, after: add)   // the pair reads as one control
+        controls.addView(legend, in: .trailing)
+        let content = NSStackView(views: [scroll, controls])
+        content.orientation = .vertical
+        content.spacing = 10
+        content.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        window.contentView = content
+        // A vertical stack centers its children at their intrinsic width, so
+        // the controls row has to be stretched to the table's width before
+        // .trailing gravity has anywhere to push the legend.
+        NSLayoutConstraint.activate([
+            controls.leadingAnchor.constraint(equalTo: scroll.leadingAnchor),
+            controls.trailingAnchor.constraint(equalTo: scroll.trailingAnchor),
+        ])
+    }
+
+    // -- engine round trips ------------------------------------------------
+
+    private func send(_ cmd: String, _ params: [String: Any] = [:]) {
+        work.async { [self] in
+            let resp = engine.request(cmd, params)
+            DispatchQueue.main.async { [self] in
+                guard let resp else {
+                    report("The engine isn't running — check the menu bar, "
+                           + "or ~/Library/Logs/abra-shell.log")
+                    return
+                }
+                guard resp["ok"] as? Bool == true else {
+                    report(resp["error"] as? String ?? "the engine rejected that")
+                    return
+                }
+                rules = (resp["rules"] as? [Any] ?? []).compactMap(DictRule.init)
+                window.subtitle = (resp["path"] as? String).map {
+                    $0.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+                } ?? ""
+                table.reloadData()
+                removeButton.isEnabled = false
+            }
+        }
+    }
+
+    private func report(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Dictionary"
+        alert.informativeText = message
+        alert.beginSheetModal(for: window)
+    }
+
+    @objc private func addRule() {
+        let heard = NSTextField(frame: NSRect(x: 78, y: 30, width: 190, height: 22))
+        heard.placeholderString = "ctu"
+        let replacement = NSTextField(frame: NSRect(x: 78, y: 0, width: 190, height: 22))
+        replacement.placeholderString = "CPU"
+        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 268, height: 52))
+        for (y, title) in [(30.0, "abra heard:"), (0.0, "should be:")] {
+            let label = NSTextField(labelWithString: title)
+            label.frame = NSRect(x: 0, y: y + 3, width: 72, height: 18)
+            label.alignment = .right
+            label.textColor = .secondaryLabelColor
+            fields.addSubview(label)
+        }
+        fields.addSubview(heard)
+        fields.addSubview(replacement)
+
+        let alert = NSAlert()
+        alert.messageText = "Add a dictionary rule"
+        alert.informativeText = "Whenever abra hears the first phrase, it pastes "
+            + "the second instead. Case is ignored; whole words only."
+        alert.accessoryView = fields
+        alert.addButton(withTitle: "Add Rule")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            send("dictionary_add", ["from": heard.stringValue,
+                                    "to": replacement.stringValue])
+        }
+        alert.window.makeFirstResponder(heard)
+    }
+
+    @objc private func removeRule() {
+        let row = table.selectedRow
+        guard row >= 0, row < rules.count, !rules[row].builtin else { return }
+        send("dictionary_remove", ["from": rules[row].heard])
+    }
+
+    // -- table -------------------------------------------------------------
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rules.count }
+
+    func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?,
+                   row: Int) -> NSView? {
+        let rule = rules[row]
+        let text: String
+        switch column?.identifier.rawValue {
+        case "heard": text = rule.heard
+        case "replacement": text = rule.replacement
+        default: text = rule.builtin ? "⌾" : ""
+        }
+        let field = NSTextField(labelWithString: text)
+        field.lineBreakMode = .byTruncatingTail
+        field.textColor = rule.builtin ? .secondaryLabelColor : .labelColor
+        field.translatesAutoresizingMaskIntoConstraints = false
+        let cell = NSTableCellView()
+        cell.addSubview(field)
+        cell.textField = field
+        NSLayoutConstraint.activate([
+            field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+            field.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            field.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = table.selectedRow
+        removeButton.isEnabled = row >= 0 && row < rules.count && !rules[row].builtin
     }
 }
 
@@ -383,6 +599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkey = HotkeyTap()
     private let work = DispatchQueue(label: "abra.transcribe")
     private var engineReady = false
+    private var dictionaryWindow: DictionaryWindow?  // built on first open
     private var pendingStartTone: DispatchWorkItem?
     private var startTonePlayed = false
 
@@ -404,6 +621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hotkeyItem = NSMenuItem(title: "Hotkey", action: nil, keyEquivalent: "")
         menu.addItem(hotkeyItem)
         menu.setSubmenu(hotkeyMenu, for: hotkeyItem)
+        let dictionaryItem = NSMenuItem(title: "Dictionary…",
+                                        action: #selector(openDictionary), keyEquivalent: "")
+        dictionaryItem.target = self
+        menu.addItem(dictionaryItem)
         let login = NSMenuItem(title: "Launch at Login",
                                action: #selector(toggleLoginItem(_:)), keyEquivalent: "")
         login.target = self
@@ -470,6 +691,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 
     private func finishSetup() {
+        // Menu/window work often runs alongside the installed Abra.app, and
+        // both event taps see the same Fn press — two recordings, two pastes.
+        // ABRA_NO_HOTKEY=1 brings up the UI and engine only.
+        if ProcessInfo.processInfo.environment["ABRA_NO_HOTKEY"] == "1" {
+            slog("ABRA_NO_HOTKEY=1 — hotkey and mic off, UI only")
+            return
+        }
+
         // Accessibility prompt (needed for paste injection), after mic settled.
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
@@ -547,6 +776,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusLine.title = "⚠ \(msg)"
         statusLine.isHidden = false
         setIcon("mic.badge.xmark", help: "abra: \(msg)")
+    }
+
+    @objc private func openDictionary() {
+        if dictionaryWindow == nil { dictionaryWindow = DictionaryWindow(engine: engineClient) }
+        dictionaryWindow?.show()
     }
 
     @objc private func selectHotkey(_ sender: NSMenuItem) {

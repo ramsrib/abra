@@ -22,6 +22,9 @@ talks to the Python engine over the stdio JSON protocol defined in
   monitoring) — simultaneous dialogs clobber each other
 - Engine supervision: auto-restart with backoff, bounded at 5 failures;
   diagnostics in `~/Library/Logs/abra-shell.log`
+- Dictionary window: the engine's phrase rules in a table, add and remove
+  your own; seed rules from `vocab.toml` are shown greyed with a ⌾ and can't
+  be edited. Pure UI — every rule and the file itself belong to the engine
 - Launch at Login (SMAppService)
 
 Engine resolution at runtime: `$ABRA_ENGINE_DIR` → `~/.abra/engine`
@@ -30,6 +33,12 @@ Engine resolution at runtime: `$ABRA_ENGINE_DIR` → `~/.abra/engine`
 Dev loop: `make mac` runs from the terminal (permissions attribute to the
 terminal). If quick Fn taps open the emoji picker, set System Settings →
 Keyboard → "Press 🌐 key to" → **Do Nothing**.
+
+For menu/window work while the installed Abra.app is running, use
+`ABRA_NO_HOTKEY=1 swift run` — otherwise both event taps see the same Fn
+press and you get two recordings and two pastes into whatever you're typing
+in. `ABRA_USER_VOCAB=/tmp/vocab.toml` likewise keeps test rules out of your
+real dictionary.
 
 ## Next
 

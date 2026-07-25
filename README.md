@@ -15,7 +15,8 @@ say ever leaves your Mac.
 - **Private** — no cloud, no accounts, no telemetry; audio and transcripts
   stay in a local folder you own
 - **Personal dictionary** — phrase rules fix *your* recurring mishears
-  ("come in and push" → "commit and push"); add yours in `vocab.local.toml`
+  ("come in and push" → "commit and push"); add yours from the menu bar
+  (**Dictionary…**) or by editing `~/.abra/vocab.local.toml`
 - **Native** — menu bar app, hold-Fn (or right Option) hotkey,
   launch at login; mic indicator only lights while you're actually recording
 - **Yours to inspect** — every dictation is logged to a local SQLite corpus
@@ -33,8 +34,9 @@ That's it — the cask installs the app (signed & notarized), its dependencies,
 and the transcription engine. Grant the permission prompts (Microphone, then
 Accessibility and Input Monitoring — all attributed to "abra"), wait out the
 one-time model download (~700MB, menu bar icon shows an hourglass), then hold
-**Fn** and talk. The menu bar icon has *Launch at Login* and a *Hotkey*
-picker (Fn, right ⌥, or right ⌘). Holding the hotkey while pressing any
+**Fn** and talk. The menu bar icon has a *Dictionary…* window (see and edit
+the phrase rules), *Launch at Login*, and a *Hotkey* picker (Fn, right ⌥, or
+right ⌘). Holding the hotkey while pressing any
 other key — Fn+arrows, ⌘ shortcuts — is left alone: combos pass through,
 no recording, no sound.
 
@@ -67,7 +69,8 @@ shell today. Features live in the engine and survive shell rewrites.
   `abra-engine` protocol server
 - `abra/shell/` — Python shell: pynput hotkey, mic, tones, paste
 - `shells/mac/` — Swift menu bar shell (hold-Fn, the daily driver)
-- `vocab.toml` / `vocab.local.toml` — dictionary rules (shared / yours)
+- `vocab.toml` — the seed dictionary rules that ship with the engine; yours
+  live in `~/.abra/vocab.local.toml`, one file for every shell on the machine
 - `EXPERIMENTS.md` — the experiment backlog this project runs on
 - `NOTES.md` — engineering chores and operational knowledge
 

@@ -16,7 +16,7 @@ from .stt import SAMPLE_RATE, Stt
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CLIPS_DIR = REPO_ROOT / "clips"
-DEFAULT_VOCAB = REPO_ROOT / "vocab.toml"
+SEED_VOCAB = REPO_ROOT / "vocab.toml"   # shipped rules; yours live in ~/.abra
 
 # Latency data (clips.db, 2026-07-19): stt_ms rises monotonically with idle
 # gap — 859ms avg under 30s idle, 1650ms avg (8.8s max) past 5m. The model
@@ -38,10 +38,10 @@ class ClipResult:
 
 class Engine:
     def __init__(self, model_id: str, save_dir: Path | None = DEFAULT_CLIPS_DIR,
-                 vocab_path: Path = DEFAULT_VOCAB, keep_warm: bool = True):
+                 seed_vocab: Path = SEED_VOCAB, keep_warm: bool = True):
         self.model_id = model_id
         self.stt = Stt(model_id)
-        self.dictionary = Dictionary.load(vocab_path)
+        self.dictionary = Dictionary(seed_vocab)
         self.store = Store(save_dir) if save_dir else None
         self.session_id = (self.store.log_session(model_id, self.stt.load_ms,
                                                   self.stt.warmup_ms)

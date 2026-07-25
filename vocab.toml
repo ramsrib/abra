@@ -1,8 +1,9 @@
-# abra personal dictionary — phrase replacements applied to raw STT output.
+# abra seed dictionary — phrase replacements applied to raw STT output.
 # Matched case-insensitively on word boundaries, longest phrase first.
 #
-# Put YOUR words in vocab.local.toml (gitignored) — same format, merged on
-# top of this file. These starter rules fix mishears everyone hits with abra.
+# These starter rules fix mishears everyone hits with abra, and ship with the
+# engine. YOUR words go in ~/.abra/vocab.local.toml — same format, merged on
+# top of this file, added from the menu bar (abra ▸ Dictionary…) or by hand.
 
 [replace]
 "come in and push" = "commit and push"
