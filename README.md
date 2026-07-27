@@ -4,11 +4,11 @@
 
 # abra
 
-> *abracadabra* — from the Aramaic **avra kehdabra**: "I create as I speak."
-
 Local push-to-talk dictation for macOS. **Hold Fn, speak, release** — clean
 text appears wherever your cursor is. Everything runs on-device: nothing you
 say ever leaves your Mac.
+
+> *abracadabra* — from the Aramaic **avra kehdabra**: "I create as I speak."
 
 - **Fast** — NVIDIA Parakeet on Apple's MLX; a few seconds of speech
   transcribes in ~250ms on Apple Silicon
