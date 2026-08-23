@@ -751,10 +751,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let resp = engineClient.transcribe(wav: wav, started: ended, ended: ended)
                 try? FileManager.default.removeItem(at: wav)
                 DispatchQueue.main.async { [self] in
-                    if let resp, resp["ok"] as? Bool == true,
-                       let text = resp["text"] as? String, !text.isEmpty {
+                    if let resp, resp["ok"] as? Bool == true {
+                        // The engine answered, so any earlier warning is stale —
+                        // even when the clip was silence and there's nothing to paste.
+                        statusLine.isHidden = true
+                        let text = resp["text"] as? String ?? ""
+                        guard !text.isEmpty else {
+                            setIcon("mic", help: "abra: ready (heard nothing)")
+                            return
+                        }
                         let ms = (resp["stt_ms"] as? Double).map { String(Int($0)) } ?? "?"
-                        statusLine.isHidden = true  // clear any earlier warning
                         setIcon("mic", help: "abra: ready (\(ms)ms) — \(text)")
                         pasteAtCursor(text)
                     } else {
