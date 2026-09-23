@@ -77,7 +77,10 @@ protocol-only; diagnostics go to stderr. Defined and versioned in
 2. No audio output streams in-process — tones play via `afplay`.
 3. The shell's main thread must never enter blocking C calls: MLX and
    audio work live on worker threads so Ctrl+C always lands. Exit with
-   `os._exit`; "clean" audio teardown is what used to hang.
+   `os._exit`; "clean" audio teardown is what used to hang. The Swift shell
+   too: every AVAudioEngine call runs on its audio queue under a watchdog
+   (a main-thread `start()` froze the app for good, `sample`d 2026-09-22),
+   and the engine is rebuilt whenever the input device changes.
 4. Mic permission belongs to the hosting terminal for the Python shell —
    and some privacy-focused terminals ship without any mic entitlement
    (recording silently yields zeros). The native shell owns its own

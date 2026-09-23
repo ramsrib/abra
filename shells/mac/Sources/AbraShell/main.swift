@@ -11,6 +11,7 @@
 
 import AppKit
 import AVFoundation
+import CoreAudio
 import Foundation
 import ServiceManagement
 
@@ -397,11 +398,29 @@ final class DictionaryWindow: NSObject, NSTableViewDataSource, NSTableViewDelega
 }
 
 // MARK: - mic capture (one engine, session-long; armed flag gates it)
+// Every AVAudioEngine call runs on `queue`, never on main: a start() that
+// never returned once froze the whole app (main thread parked in
+// AdaptToIOBufferSize while CoreAudio spun re-reading the HW format, sampled
+// 2026-09-22 after three weeks of uptime and device churn). Each call gets a
+// watchdog; one that doesn't return in time reports the HAL as wedged.
 
 final class AudioCapture {
     static let sampleRate: Double = 16_000
-    private let engine = AVAudioEngine()
-    private var converter: AVAudioConverter!
+    /// Generous: a Bluetooth mic can take a second or two to switch profiles.
+    static let wedgeTimeout: TimeInterval = 6
+
+    /// Fires on main, once, when an engine call hasn't returned in time.
+    var onWedged: ((String) -> Void)?
+    /// Fires on main when capture is unusable (rebuilds exhausted).
+    var onUnavailable: ((String) -> Void)?
+
+    private let queue = DispatchQueue(label: "abra.audio")
+    private let files = DispatchQueue(label: "abra.audio.files")  // serial: keeps clip order
+    private var engine: AVAudioEngine?          // queue-only
+    private var configObserver: NSObjectProtocol?  // queue-only
+    private var rebuildPending = false          // queue-only
+    private var rebuildFailures = 0             // queue-only
+    private var wedged = false                  // main-only
     private let outFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                           sampleRate: sampleRate, channels: 1,
                                           interleaved: false)!
@@ -409,14 +428,80 @@ final class AudioCapture {
     private var armed = false
     private let lock = NSLock()
 
-    /// Install the tap once; the engine itself starts/pauses per clip so the
-    /// macOS mic-in-use indicator only shows while the hotkey is held.
+    /// Build the tap; the engine itself starts/pauses per clip so the macOS
+    /// mic-in-use indicator only shows while the hotkey is held.
     /// (AVAudioEngine doesn't have PortAudio's start/stop deadlock — that rule
-    /// is specific to the Python shell.)
-    func start() throws {
-        let input = engine.inputNode
+    /// is specific to the Python shell.) Completion runs on main.
+    func start(completion: @escaping (Error?) -> Void) {
+        run("startup") { [self] in
+            do {
+                try build()
+                // Verify the mic works (and trigger the permission prompt)
+                // once at startup, then release it until the hotkey is held.
+                try engine?.start()
+                engine?.pause()
+                watchDefaultInput()
+                DispatchQueue.main.async { completion(nil) }
+            } catch {
+                DispatchQueue.main.async { completion(error) }
+            }
+        }
+    }
+
+    // Capture state changes ride the audio queue with the engine calls, so a
+    // quick release→press can't have the release's pause land on the new clip.
+
+    /// `started` runs on main once the mic is actually live (or failed to go live).
+    func arm(started: @escaping (Bool) -> Void) {
+        run("start") { [self] in
+            lock.lock(); samples = []; armed = true; lock.unlock()
+            let ok = (try? engine?.start()) != nil  // nil engine or a throw
+            if !ok { slog("audio: engine failed to start for capture") }
+            DispatchQueue.main.async { started(ok) }  // lights the mic indicator
+        }
+    }
+
+    /// Abort a capture without producing audio (hotkey used in a combo).
+    func cancelCapture() {
+        run("pause") { [self] in
+            engine?.pause()
+            lock.lock(); armed = false; samples = []; lock.unlock()
+        }
+    }
+
+    /// Disarm and write captured audio to a temp wav; completion (on main)
+    /// gets nil if the clip was too short.
+    func disarmToWav(minSeconds: Double, completion: @escaping (URL?) -> Void) {
+        run("pause") { [self] in
+            engine?.pause()  // releases the mic; indicator goes dark
+            lock.lock()
+            armed = false
+            let captured = samples
+            lock.unlock()
+            // File work is outside the watched call: slow disk isn't a HAL wedge.
+            files.async { [self] in
+                let url = writeWav(captured, minSeconds: minSeconds)
+                DispatchQueue.main.async { completion(url) }
+            }
+        }
+    }
+
+    // MARK: engine lifecycle (queue-only)
+
+    /// (Re)create the engine and its tap. The tap format comes from the
+    /// current input device, so this reruns whenever that device changes —
+    /// a session-long engine otherwise keeps a stale view of the hardware.
+    /// The old engine stays in place unless the new one is fully set up.
+    private func build() throws {
+        let fresh = AVAudioEngine()
+        let input = fresh.inputNode
         let inFormat = input.outputFormat(forBus: 0)
-        converter = AVAudioConverter(from: inFormat, to: outFormat)!
+        guard inFormat.sampleRate > 0,
+              let converter = AVAudioConverter(from: inFormat, to: outFormat) else {
+            throw NSError(domain: "abra", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "no usable input device"])
+        }
+        let outFormat = outFormat
         input.installTap(onBus: 0, bufferSize: 4096, format: inFormat) { [self] buf, _ in
             lock.lock(); defer { lock.unlock() }
             guard armed else { return }
@@ -435,31 +520,103 @@ final class AudioCapture {
                                                                count: Int(out.frameLength)))
             }
         }
-        engine.prepare()
-        // Verify the mic works (and trigger the permission prompt) once at
-        // startup, then release it until the hotkey is held.
-        try engine.start()
-        engine.pause()
+        fresh.prepare()
+
+        if let old = engine {
+            if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+            old.inputNode.removeTap(onBus: 0)
+            old.stop()
+        }
+        engine = fresh
+        // The notification means this engine stopped and uninitialized itself
+        // (Apple docs), so every one it posts needs a rebuild. Observing only
+        // `fresh` means a retired engine can't trigger one.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: fresh, queue: nil
+        ) { [weak self, weak fresh] _ in
+            self?.queue.async {
+                // Removing the observer doesn't cancel a callback already queued.
+                guard let self, let fresh, self.engine === fresh else { return }
+                self.scheduleRebuild("engine configuration changed")
+            }
+        }
     }
 
-    func arm() {
-        lock.lock(); samples = []; armed = true; lock.unlock()
-        try? engine.start()  // resumes IO; lights the mic indicator
+    private func watchDefaultInput() {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &addr, queue
+        ) { [weak self] _, _ in
+            self?.scheduleRebuild("default input device changed")
+        }
     }
 
-    /// Abort a capture without producing audio (hotkey used in a combo).
-    func cancelCapture() {
-        engine.pause()
-        lock.lock(); armed = false; samples = []; lock.unlock()
+    /// Device changes arrive in bursts (and often as both a HAL and an engine
+    /// notification); coalesce them into one rebuild. A failed rebuild (the
+    /// new device not ready yet, mid-churn) retries with backoff: 1s…16s.
+    private func scheduleRebuild(_ reason: String, delay: TimeInterval = 0.3) {
+        guard !rebuildPending else { return }
+        rebuildPending = true
+        queue.asyncAfter(deadline: .now() + delay) { [self] in
+            rebuildPending = false
+            run("rebuild") { [self] in
+                slog("audio: \(reason) — rebuilding capture engine")
+                do {
+                    try build()
+                    lock.lock(); let recording = armed; lock.unlock()
+                    if recording { try engine?.start() }
+                    rebuildFailures = 0
+                } catch {
+                    rebuildFailures += 1
+                    guard rebuildFailures <= 5 else {
+                        slog("audio: rebuild failed: \(error.localizedDescription) — "
+                             + "giving up until the next device change")
+                        rebuildFailures = 0
+                        DispatchQueue.main.async { [self] in
+                            onUnavailable?("mic unavailable after device change — see ~/Library/Logs/abra-shell.log")
+                        }
+                        return
+                    }
+                    let retry = pow(2.0, Double(rebuildFailures - 1))
+                    slog("audio: rebuild failed: \(error.localizedDescription) — "
+                         + "retry \(rebuildFailures)/5 in \(Int(retry))s")
+                    scheduleRebuild("retry after failed rebuild", delay: retry)
+                }
+            }
+        }
     }
 
-    /// Disarm and write captured audio to a temp wav. Returns nil if too short.
-    func disarmToWav(minSeconds: Double) -> URL? {
-        engine.pause()  // releases the mic; indicator goes dark
-        lock.lock()
-        armed = false
-        let captured = samples
-        lock.unlock()
+    /// Run an engine call on the audio queue under a watchdog. The clock
+    /// starts when the call starts, not when it's queued, so waiting behind a
+    /// slow (but healthy) rebuild isn't mistaken for a wedge. A wedged HAL
+    /// call can't be interrupted, so the watchdog only reports it.
+    private func run(_ what: String, _ op: @escaping () -> Void) {
+        queue.async { [self] in
+            let group = DispatchGroup()
+            group.enter()
+            let began = Date()
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.wedgeTimeout) { [self] in
+                guard group.wait(timeout: .now()) == .timedOut, !wedged else { return }
+                wedged = true
+                onWedged?(what)
+            }
+            op()
+            group.leave()
+            let took = Date().timeIntervalSince(began)
+            if took >= Self.wedgeTimeout {
+                // Late but alive: re-arm the watchdog for the next real wedge.
+                DispatchQueue.main.async { [self] in
+                    slog("audio: \(what) returned after \(Int(took))s")
+                    wedged = false
+                }
+            }
+        }
+    }
+
+    private func writeWav(_ captured: [Float], minSeconds: Double) -> URL? {
         guard Double(captured.count) / AudioCapture.sampleRate >= minSeconds else { return nil }
 
         let url = FileManager.default.temporaryDirectory
@@ -602,6 +759,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dictionaryWindow: DictionaryWindow?  // built on first open
     private var pendingStartTone: DispatchWorkItem?
     private var startTonePlayed = false
+    private let launchedAt = Date()
+    private var recording = false  // hotkey held; guards stale audio callbacks
+    private var captureId = 0
+    private var captureFailed = false  // this press's mic never came up
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -703,69 +864,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let opts = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(opts)
 
-        do { try audio.start() } catch {
-            fail("mic unavailable: \(error.localizedDescription)")
+        audio.onUnavailable = { [self] msg in fail(msg) }
+        audio.onWedged = { [self] what in
+            slog("audio: \(what) hung >\(Int(AudioCapture.wedgeTimeout))s — CoreAudio wedged")
+            relaunchForAudio()
+        }
+        audio.start { [self] error in
+            if let error {
+                fail("mic unavailable: \(error.localizedDescription)")
+                return
+            }
+            startHotkey()
+        }
+    }
+
+    /// A CoreAudio call that never returns can't be unstuck in-process; a
+    /// fresh process can. Only from the installed bundle, and not if we just
+    /// launched (a wedge at startup would otherwise relaunch forever).
+    private func relaunchForAudio() {
+        let bundle = Bundle.main.bundleURL
+        guard bundle.pathExtension == "app", Date().timeIntervalSince(launchedAt) > 60 else {
+            fail("audio stuck — quit and relaunch abra")
             return
         }
+        slog("audio: relaunching \(bundle.path)")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", bundle.path]
+        do { try p.run() } catch {
+            slog("audio: relaunch helper failed: \(error.localizedDescription)")
+            fail("audio stuck — quit and relaunch abra")
+            return
+        }
+        engineClient.stop()
+        _exit(0)  // exit() runs teardown that can block on the wedged HAL
+    }
 
+    private func startHotkey() {
         guard hotkey.start() else {
             fail("event tap refused — grant Input Monitoring, then relaunch")
             return
         }
         hotkey.onPress = { [self] in
             guard engineReady else { return }
-            audio.arm()
-            setIcon("mic.fill", help: "abra: recording")
-            // Delay the start tone slightly: if the hotkey turns out to be
-            // part of a combo (Fn+arrow etc.), the cancel arrives first and
-            // combos stay completely silent. Capture is armed from t=0, so
-            // no speech is lost.
+            captureId += 1
+            let id = captureId
+            recording = true
+            captureFailed = false
             startTonePlayed = false
-            let tone = DispatchWorkItem { [self] in
-                startTonePlayed = true
-                playTone("record-start.wav")
+            setIcon("mic.fill", help: "abra: recording")
+            audio.arm { [self] live in
+                guard id == captureId else { return }  // superseded by a newer press
+                guard live else {
+                    captureFailed = true
+                    recording = false
+                    fail("mic failed to start — see ~/Library/Logs/abra-shell.log")
+                    return
+                }
+                guard recording else { return }  // released or cancelled already
+                // Delay the start tone slightly: if the hotkey turns out to be
+                // part of a combo (Fn+arrow etc.), the cancel arrives first and
+                // combos stay completely silent. The tone follows the mic going
+                // live, so speech after it is always captured.
+                let tone = DispatchWorkItem { [self] in
+                    startTonePlayed = true
+                    playTone("record-start.wav")
+                }
+                pendingStartTone = tone
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: tone)
             }
-            pendingStartTone = tone
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: tone)
         }
         hotkey.onCombo = { [self] in
+            recording = false
             pendingStartTone?.cancel()
             pendingStartTone = nil
             audio.cancelCapture()
             setIcon("mic", help: "abra: ready")
         }
         hotkey.onRelease = { [self] in
-            guard engineReady else { return }
+            // Always release the mic, even if the engine died mid-clip; only
+            // transcription needs it. A press that never armed (engine not
+            // ready yet, or already cancelled as a combo) has nothing to release.
+            let armed = recording || captureFailed
+            recording = false
+            guard armed else { return }
             pendingStartTone?.cancel()
             pendingStartTone = nil
             if startTonePlayed {
                 playTone("record-stop.wav")
             }
             let ended = Date().timeIntervalSince1970
-            guard let wav = audio.disarmToWav(minSeconds: 0.4) else {
-                setIcon("mic", help: "abra: ready (clip too short)")
-                return
-            }
-            setIcon("waveform", help: "abra: transcribing…")
-            work.async { [self] in
-                let resp = engineClient.transcribe(wav: wav, started: ended, ended: ended)
-                try? FileManager.default.removeItem(at: wav)
-                DispatchQueue.main.async { [self] in
-                    if let resp, resp["ok"] as? Bool == true {
-                        // The engine answered, so any earlier warning is stale —
-                        // even when the clip was silence and there's nothing to paste.
-                        statusLine.isHidden = true
-                        let text = resp["text"] as? String ?? ""
-                        guard !text.isEmpty else {
-                            setIcon("mic", help: "abra: ready (heard nothing)")
-                            return
-                        }
-                        let ms = (resp["stt_ms"] as? Double).map { String(Int($0)) } ?? "?"
-                        setIcon("mic", help: "abra: ready (\(ms)ms) — \(text)")
-                        pasteAtCursor(text)
-                    } else {
-                        fail(resp?["error"] as? String ?? "no response from engine")
+            let id = captureId
+            audio.disarmToWav(minSeconds: 0.4) { [self] wav in
+                guard let wav else {
+                    // Only the latest capture owns the icon, and a failed start
+                    // already shows its own error.
+                    if isCurrent(id), !captureFailed {
+                        setIcon("mic", help: "abra: ready (clip too short)")
                     }
+                    return
+                }
+                guard engineReady else {
+                    try? FileManager.default.removeItem(at: wav)
+                    return
+                }
+                transcribe(wav, ended: ended, id: id)
+            }
+        }
+    }
+
+    /// The icon belongs to the newest capture, and to none while one is recording.
+    private func isCurrent(_ id: Int) -> Bool { id == captureId && !recording }
+
+    private func transcribe(_ wav: URL, ended: TimeInterval, id: Int) {
+        if isCurrent(id) { setIcon("waveform", help: "abra: transcribing…") }
+        work.async { [self] in
+            let resp = engineClient.transcribe(wav: wav, started: ended, ended: ended)
+            try? FileManager.default.removeItem(at: wav)
+            DispatchQueue.main.async { [self] in
+                if let resp, resp["ok"] as? Bool == true {
+                    // The engine answered, so any earlier warning is stale —
+                    // even when the clip was silence and there's nothing to paste.
+                    statusLine.isHidden = true
+                    let text = resp["text"] as? String ?? ""
+                    guard !text.isEmpty else {
+                        if isCurrent(id) { setIcon("mic", help: "abra: ready (heard nothing)") }
+                        return
+                    }
+                    let ms = (resp["stt_ms"] as? Double).map { String(Int($0)) } ?? "?"
+                    if isCurrent(id) { setIcon("mic", help: "abra: ready (\(ms)ms) — \(text)") }
+                    pasteAtCursor(text)
+                } else {
+                    fail(resp?["error"] as? String ?? "no response from engine")
                 }
             }
         }
